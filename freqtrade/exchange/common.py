@@ -2,13 +2,23 @@ import asyncio
 import logging
 import time
 from functools import wraps
+from typing import Any, Callable, Optional, TypeVar, cast, overload
 
+from freqtrade.constants import ExchangeConfig
 from freqtrade.exceptions import DDosProtection, RetryableOrderError, TemporaryError
 from freqtrade.mixins import LoggingMixin
 
 
 logger = logging.getLogger(__name__)
 __logging_mixin = None
+
+
+def _reset_logging_mixin():
+    """
+    Reset global logging mixin - used in tests only.
+    """
+    global __logging_mixin
+    __logging_mixin = LoggingMixin(logger)
 
 
 def _get_logging_mixin():
@@ -35,44 +45,62 @@ BAD_EXCHANGES = {
 MAP_EXCHANGE_CHILDCLASS = {
     'binanceus': 'binance',
     'binanceje': 'binance',
+    'binanceusdm': 'binance',
     'okex': 'okx',
+    'gateio': 'gate',
 }
 
+SUPPORTED_EXCHANGES = [
+    'binance',
+    'bittrex',
+    'gate',
+    'huobi',
+    'kraken',
+    'okx',
+]
 
 EXCHANGE_HAS_REQUIRED = [
     # Required / private
     'fetchOrder',
     'cancelOrder',
     'createOrder',
-    # 'createLimitOrder', 'createMarketOrder',
     'fetchBalance',
 
     # Public endpoints
-    'loadMarkets',
     'fetchOHLCV',
 ]
 
 EXCHANGE_HAS_OPTIONAL = [
     # Private
     'fetchMyTrades',  # Trades for order - fee detection
+    'createLimitOrder', 'createMarketOrder',  # Either OR for orders
+    # 'setLeverage',  # Margin/Futures trading
+    # 'setMarginMode',  # Margin/Futures trading
+    # 'fetchFundingHistory', # Futures trading
     # Public
     'fetchOrderBook', 'fetchL2OrderBook', 'fetchTicker',  # OR for pricing
     'fetchTickers',  # For volumepairlist?
     'fetchTrades',  # Downloading trades data
+    # 'fetchFundingRateHistory',  # Futures trading
+    # 'fetchPositions',  # Futures trading
+    # 'fetchLeverageTiers',  # Futures initialization
+    # 'fetchMarketLeverageTiers',  # Futures initialization
+    # 'fetchOpenOrders', 'fetchClosedOrders',  # 'fetchOrders',  # Refinding balance...
 ]
 
 
-def remove_credentials(config) -> None:
+def remove_exchange_credentials(exchange_config: ExchangeConfig, dry_run: bool) -> None:
     """
     Removes exchange keys from the configuration and specifies dry-run
     Used for backtesting / hyperopt / edge and utils.
     Modifies the input dict!
     """
-    if config.get('dry_run', False):
-        config['exchange']['key'] = ''
-        config['exchange']['secret'] = ''
-        config['exchange']['password'] = ''
-        config['exchange']['uid'] = ''
+    if dry_run:
+        exchange_config['key'] = ''
+        exchange_config['apiKey'] = ''
+        exchange_config['secret'] = ''
+        exchange_config['password'] = ''
+        exchange_config['uid'] = ''
 
 
 def calculate_backoff(retrycount, max_retries):
@@ -85,7 +113,7 @@ def calculate_backoff(retrycount, max_retries):
 def retrier_async(f):
     async def wrapper(*args, **kwargs):
         count = kwargs.pop('count', API_RETRY_COUNT)
-        kucoin = args[0].name == "Kucoin"  # Check if the exchange is KuCoin.
+        kucoin = args[0].name == "KuCoin"  # Check if the exchange is KuCoin.
         try:
             return await f(*args, **kwargs)
         except TemporaryError as ex:
@@ -116,8 +144,22 @@ def retrier_async(f):
     return wrapper
 
 
-def retrier(_func=None, retries=API_RETRY_COUNT):
-    def decorator(f):
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+# Type shenanigans
+@overload
+def retrier(_func: F) -> F:
+    ...
+
+
+@overload
+def retrier(*, retries=API_RETRY_COUNT) -> Callable[[F], F]:
+    ...
+
+
+def retrier(_func: Optional[F] = None, *, retries=API_RETRY_COUNT):
+    def decorator(f: F) -> F:
         @wraps(f)
         def wrapper(*args, **kwargs):
             count = kwargs.pop('count', retries)
@@ -138,7 +180,7 @@ def retrier(_func=None, retries=API_RETRY_COUNT):
                 else:
                     logger.warning(msg + 'Giving up.')
                     raise ex
-        return wrapper
+        return cast(F, wrapper)
     # Support both @retrier and @retrier(retries=2) syntax
     if _func is None:
         return decorator

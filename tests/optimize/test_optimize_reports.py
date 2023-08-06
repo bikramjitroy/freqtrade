@@ -1,29 +1,50 @@
 import re
 from datetime import timedelta
 from pathlib import Path
+from shutil import copyfile
 
+import joblib
 import pandas as pd
 import pytest
-from arrow import Arrow
 
 from freqtrade.configuration import TimeRange
-from freqtrade.constants import DATETIME_PRINT_FORMAT, LAST_BT_RESULT_FN
+from freqtrade.constants import BACKTEST_BREAKDOWNS, DATETIME_PRINT_FORMAT, LAST_BT_RESULT_FN
 from freqtrade.data import history
 from freqtrade.data.btanalysis import (get_latest_backtest_filename, load_backtest_data,
                                        load_backtest_stats)
 from freqtrade.edge import PairInfo
-from freqtrade.enums import SellType
-from freqtrade.optimize.optimize_reports import (_get_resample_from_period, generate_backtest_stats,
-                                                 generate_daily_stats, generate_edge_table,
+from freqtrade.enums import ExitType
+from freqtrade.optimize.optimize_reports import (generate_backtest_stats, generate_daily_stats,
+                                                 generate_edge_table, generate_exit_reason_stats,
                                                  generate_pair_metrics,
                                                  generate_periodic_breakdown_stats,
-                                                 generate_sell_reason_stats,
                                                  generate_strategy_comparison,
                                                  generate_trading_stats, show_sorted_pairlist,
+                                                 store_backtest_analysis_results,
                                                  store_backtest_stats, text_table_bt_results,
-                                                 text_table_sell_reason, text_table_strategy)
+                                                 text_table_exit_reason, text_table_strategy)
+from freqtrade.optimize.optimize_reports.optimize_reports import (_get_resample_from_period,
+                                                                  calc_streak)
 from freqtrade.resolvers.strategy_resolver import StrategyResolver
-from tests.data.test_history import _backup_file, _clean_test_file
+from freqtrade.util import dt_ts
+from freqtrade.util.datetime_helpers import dt_from_ts, dt_utc
+from tests.conftest import CURRENT_TEST_STRATEGY
+from tests.data.test_history import _clean_test_file
+
+
+def _backup_file(file: Path, copy_file: bool = False) -> None:
+    """
+    Backup existing file to avoid deleting the user file
+    :param file: complete path to the file
+    :param copy_file: keep file in place too.
+    :return: None
+    """
+    file_swp = str(file) + '.swp'
+    if file.is_file():
+        file.rename(file_swp)
+
+        if copy_file:
+            copyfile(file_swp, file)
 
 
 def test_text_table_bt_results():
@@ -38,14 +59,14 @@ def test_text_table_bt_results():
     )
 
     result_str = (
-        '|    Pair |   Buys |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |   Tot Profit % |'
-        '   Avg Duration |   Win  Draw  Loss  Win% |\n'
-        '|---------+--------+----------------+----------------+------------------+----------------+'
-        '----------------+-------------------------|\n'
-        '| ETH/BTC |      3 |           8.33 |          25.00 |       0.50000000 |          12.50 |'
-        '        0:20:00 |     2     0     1  66.7 |\n'
-        '|   TOTAL |      3 |           8.33 |          25.00 |       0.50000000 |          12.50 |'
-        '        0:20:00 |     2     0     1  66.7 |'
+        '|    Pair |   Entries |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |   '
+        'Tot Profit % |   Avg Duration |   Win  Draw  Loss  Win% |\n'
+        '|---------+-----------+----------------+----------------+------------------+'
+        '----------------+----------------+-------------------------|\n'
+        '| ETH/BTC |         3 |           8.33 |          25.00 |       0.50000000 |          '
+        '12.50 |        0:20:00 |     2     0     1  66.7 |\n'
+        '|   TOTAL |         3 |           8.33 |          25.00 |       0.50000000 |          '
+        '12.50 |        0:20:00 |     2     0     1  66.7 |'
     )
 
     pair_results = generate_pair_metrics(['ETH/BTC'], stake_currency='BTC',
@@ -54,7 +75,7 @@ def test_text_table_bt_results():
 
 
 def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
-    default_conf.update({'strategy': 'StrategyTestV2'})
+    default_conf.update({'strategy': CURRENT_TEST_STRATEGY})
     StrategyResolver.load_strategy(default_conf)
 
     results = {'DefStrat': {
@@ -62,21 +83,22 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
                                           "UNITTEST/BTC", "UNITTEST/BTC"],
                                  "profit_ratio": [0.003312, 0.010801, 0.013803, 0.002780],
                                  "profit_abs": [0.000003, 0.000011, 0.000014, 0.000003],
-                                 "open_date": [Arrow(2017, 11, 14, 19, 32, 00).datetime,
-                                               Arrow(2017, 11, 14, 21, 36, 00).datetime,
-                                               Arrow(2017, 11, 14, 22, 12, 00).datetime,
-                                               Arrow(2017, 11, 14, 22, 44, 00).datetime],
-                                 "close_date": [Arrow(2017, 11, 14, 21, 35, 00).datetime,
-                                                Arrow(2017, 11, 14, 22, 10, 00).datetime,
-                                                Arrow(2017, 11, 14, 22, 43, 00).datetime,
-                                                Arrow(2017, 11, 14, 22, 58, 00).datetime],
+                                 "open_date": [dt_utc(2017, 11, 14, 19, 32, 00),
+                                               dt_utc(2017, 11, 14, 21, 36, 00),
+                                               dt_utc(2017, 11, 14, 22, 12, 00),
+                                               dt_utc(2017, 11, 14, 22, 44, 00)],
+                                 "close_date": [dt_utc(2017, 11, 14, 21, 35, 00),
+                                                dt_utc(2017, 11, 14, 22, 10, 00),
+                                                dt_utc(2017, 11, 14, 22, 43, 00),
+                                                dt_utc(2017, 11, 14, 22, 58, 00)],
                                  "open_rate": [0.002543, 0.003003, 0.003089, 0.003214],
                                  "close_rate": [0.002546, 0.003014, 0.003103, 0.003217],
                                  "trade_duration": [123, 34, 31, 14],
                                  "is_open": [False, False, False, True],
+                                 "is_short": [False, False, False, False],
                                  "stake_amount": [0.01, 0.01, 0.01, 0.01],
-                                 "sell_reason": [SellType.ROI, SellType.STOP_LOSS,
-                                                 SellType.ROI, SellType.FORCE_SELL]
+                                 "exit_reason": [ExitType.ROI, ExitType.STOP_LOSS,
+                                                 ExitType.ROI, ExitType.FORCE_EXIT]
                                  }),
         'config': default_conf,
         'locks': [],
@@ -84,14 +106,17 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
         'rejected_signals': 20,
         'timedout_entry_orders': 0,
         'timedout_exit_orders': 0,
-        'backtest_start_time': Arrow.utcnow().int_timestamp,
-        'backtest_end_time': Arrow.utcnow().int_timestamp,
+        'canceled_trade_entries': 0,
+        'canceled_entry_orders': 0,
+        'replaced_entry_orders': 0,
+        'backtest_start_time': dt_ts() // 1000,
+        'backtest_end_time': dt_ts() // 1000,
         'run_id': '123',
         }
         }
     timerange = TimeRange.parse_timerange('1510688220-1510700340')
-    min_date = Arrow.fromtimestamp(1510688220)
-    max_date = Arrow.fromtimestamp(1510700340)
+    min_date = dt_from_ts(1510688220)
+    max_date = dt_from_ts(1510700340)
     btdata = history.load_data(testdatadir, '1m', ['UNITTEST/BTC'], timerange=timerange,
                                fill_up_missing=True)
 
@@ -113,21 +138,22 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
             {"pair": ["UNITTEST/BTC", "UNITTEST/BTC", "UNITTEST/BTC", "UNITTEST/BTC"],
              "profit_ratio": [0.003312, 0.010801, -0.013803, 0.002780],
              "profit_abs": [0.000003, 0.000011, -0.000014, 0.000003],
-             "open_date": [Arrow(2017, 11, 14, 19, 32, 00).datetime,
-                           Arrow(2017, 11, 14, 21, 36, 00).datetime,
-                           Arrow(2017, 11, 14, 22, 12, 00).datetime,
-                           Arrow(2017, 11, 14, 22, 44, 00).datetime],
-             "close_date": [Arrow(2017, 11, 14, 21, 35, 00).datetime,
-                            Arrow(2017, 11, 14, 22, 10, 00).datetime,
-                            Arrow(2017, 11, 14, 22, 43, 00).datetime,
-                            Arrow(2017, 11, 14, 22, 58, 00).datetime],
+             "open_date": [dt_utc(2017, 11, 14, 19, 32, 00),
+                           dt_utc(2017, 11, 14, 21, 36, 00),
+                           dt_utc(2017, 11, 14, 22, 12, 00),
+                           dt_utc(2017, 11, 14, 22, 44, 00)],
+             "close_date": [dt_utc(2017, 11, 14, 21, 35, 00),
+                            dt_utc(2017, 11, 14, 22, 10, 00),
+                            dt_utc(2017, 11, 14, 22, 43, 00),
+                            dt_utc(2017, 11, 14, 22, 58, 00)],
              "open_rate": [0.002543, 0.003003, 0.003089, 0.003214],
              "close_rate": [0.002546, 0.003014, 0.0032903, 0.003217],
              "trade_duration": [123, 34, 31, 14],
              "is_open": [False, False, False, True],
+             "is_short": [False, False, False, False],
              "stake_amount": [0.01, 0.01, 0.01, 0.01],
-             "sell_reason": [SellType.ROI, SellType.ROI,
-                             SellType.STOP_LOSS, SellType.FORCE_SELL]
+             "exit_reason": [ExitType.ROI, ExitType.ROI,
+                             ExitType.STOP_LOSS, ExitType.FORCE_EXIT]
              }),
         'config': default_conf,
         'locks': [],
@@ -135,8 +161,11 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
         'rejected_signals': 20,
         'timedout_entry_orders': 0,
         'timedout_exit_orders': 0,
-        'backtest_start_time': Arrow.utcnow().int_timestamp,
-        'backtest_end_time': Arrow.utcnow().int_timestamp,
+        'canceled_trade_entries': 0,
+        'canceled_entry_orders': 0,
+        'replaced_entry_orders': 0,
+        'backtest_start_time': dt_ts() // 1000,
+        'backtest_end_time': dt_ts() // 1000,
         'run_id': '124',
         }
     }
@@ -161,7 +190,7 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
     _backup_file(filename_last, copy_file=True)
     assert not filename.is_file()
 
-    store_backtest_stats(filename, stats)
+    store_backtest_stats(filename, stats, '2022_01_01_15_05_13')
 
     # get real Filename (it's btresult-<date>.json)
     last_fn = get_latest_backtest_filename(filename_last.parent)
@@ -182,21 +211,79 @@ def test_generate_backtest_stats(default_conf, testdatadir, tmpdir):
 
 def test_store_backtest_stats(testdatadir, mocker):
 
-    dump_mock = mocker.patch('freqtrade.optimize.optimize_reports.file_dump_json')
+    dump_mock = mocker.patch('freqtrade.optimize.optimize_reports.bt_storage.file_dump_json')
 
-    store_backtest_stats(testdatadir, {'metadata': {}})
+    store_backtest_stats(testdatadir, {'metadata': {}}, '2022_01_01_15_05_13')
 
     assert dump_mock.call_count == 3
     assert isinstance(dump_mock.call_args_list[0][0][0], Path)
-    assert str(dump_mock.call_args_list[0][0][0]).startswith(str(testdatadir/'backtest-result'))
+    assert str(dump_mock.call_args_list[0][0][0]).startswith(str(testdatadir / 'backtest-result'))
 
     dump_mock.reset_mock()
     filename = testdatadir / 'testresult.json'
-    store_backtest_stats(filename, {'metadata': {}})
+    store_backtest_stats(filename, {'metadata': {}}, '2022_01_01_15_05_13')
     assert dump_mock.call_count == 3
     assert isinstance(dump_mock.call_args_list[0][0][0], Path)
     # result will be testdatadir / testresult-<timestamp>.json
     assert str(dump_mock.call_args_list[0][0][0]).startswith(str(testdatadir / 'testresult'))
+
+
+def test_store_backtest_candles(testdatadir, mocker):
+
+    dump_mock = mocker.patch(
+        'freqtrade.optimize.optimize_reports.bt_storage.file_dump_joblib')
+
+    candle_dict = {'DefStrat': {'UNITTEST/BTC': pd.DataFrame()}}
+
+    # mock directory exporting
+    store_backtest_analysis_results(testdatadir, candle_dict, {}, '2022_01_01_15_05_13')
+
+    assert dump_mock.call_count == 2
+    assert isinstance(dump_mock.call_args_list[0][0][0], Path)
+    assert str(dump_mock.call_args_list[0][0][0]).endswith('_signals.pkl')
+
+    dump_mock.reset_mock()
+    # mock file exporting
+    filename = Path(testdatadir / 'testresult')
+    store_backtest_analysis_results(filename, candle_dict, {}, '2022_01_01_15_05_13')
+    assert dump_mock.call_count == 2
+    assert isinstance(dump_mock.call_args_list[0][0][0], Path)
+    # result will be testdatadir / testresult-<timestamp>_signals.pkl
+    assert str(dump_mock.call_args_list[0][0][0]).endswith('_signals.pkl')
+    dump_mock.reset_mock()
+
+
+def test_write_read_backtest_candles(tmpdir):
+
+    candle_dict = {'DefStrat': {'UNITTEST/BTC': pd.DataFrame()}}
+
+    # test directory exporting
+    sample_date = '2022_01_01_15_05_13'
+    store_backtest_analysis_results(Path(tmpdir), candle_dict, {}, sample_date)
+    stored_file = Path(tmpdir / f'backtest-result-{sample_date}_signals.pkl')
+    with stored_file.open("rb") as scp:
+        pickled_signal_candles = joblib.load(scp)
+
+    assert pickled_signal_candles.keys() == candle_dict.keys()
+    assert pickled_signal_candles['DefStrat'].keys() == pickled_signal_candles['DefStrat'].keys()
+    assert pickled_signal_candles['DefStrat']['UNITTEST/BTC'] \
+        .equals(pickled_signal_candles['DefStrat']['UNITTEST/BTC'])
+
+    _clean_test_file(stored_file)
+
+    # test file exporting
+    filename = Path(tmpdir / 'testresult')
+    store_backtest_analysis_results(filename, candle_dict, {}, sample_date)
+    stored_file = Path(tmpdir / f'testresult-{sample_date}_signals.pkl')
+    with stored_file.open("rb") as scp:
+        pickled_signal_candles = joblib.load(scp)
+
+    assert pickled_signal_candles.keys() == candle_dict.keys()
+    assert pickled_signal_candles['DefStrat'].keys() == pickled_signal_candles['DefStrat'].keys()
+    assert pickled_signal_candles['DefStrat']['UNITTEST/BTC'] \
+        .equals(pickled_signal_candles['DefStrat']['UNITTEST/BTC'])
+
+    _clean_test_file(stored_file)
 
 
 def test_generate_pair_metrics():
@@ -226,7 +313,7 @@ def test_generate_pair_metrics():
 
 def test_generate_daily_stats(testdatadir):
 
-    filename = testdatadir / "backtest-result_new.json"
+    filename = testdatadir / "backtest_results/backtest-result.json"
     bt_data = load_backtest_data(filename)
     res = generate_daily_stats(bt_data)
     assert isinstance(res, dict)
@@ -246,7 +333,7 @@ def test_generate_daily_stats(testdatadir):
 
 
 def test_generate_trading_stats(testdatadir):
-    filename = testdatadir / "backtest-result_new.json"
+    filename = testdatadir / "backtest_results/backtest-result.json"
     bt_data = load_backtest_data(filename)
     res = generate_trading_stats(bt_data)
     assert isinstance(res, dict)
@@ -262,7 +349,33 @@ def test_generate_trading_stats(testdatadir):
     assert res['losses'] == 0
 
 
-def test_text_table_sell_reason():
+def test_calc_streak(testdatadir):
+    df = pd.DataFrame({
+            'profit_ratio': [0.05, -0.02, -0.03, -0.05, 0.01, 0.02, 0.03, 0.04, -0.02, -0.03],
+        })
+    # 4 consecutive wins, 3 consecutive losses
+    res = calc_streak(df)
+    assert res == (4, 3)
+    assert isinstance(res[0], int)
+    assert isinstance(res[1], int)
+
+    # invert situation
+    df1 = df.copy()
+    df1['profit_ratio'] = df1['profit_ratio'] * -1
+    assert calc_streak(df1) == (3, 4)
+
+    df_empty = pd.DataFrame({
+            'profit_ratio': [],
+    })
+    assert df_empty.empty
+    assert calc_streak(df_empty) == (0, 0)
+
+    filename = testdatadir / "backtest_results/backtest-result.json"
+    bt_data = load_backtest_data(filename)
+    assert calc_streak(bt_data) == (7, 18)
+
+
+def test_text_table_exit_reason():
 
     results = pd.DataFrame(
         {
@@ -273,12 +386,12 @@ def test_text_table_sell_reason():
             'wins': [2, 0, 0],
             'draws': [0, 0, 0],
             'losses': [0, 0, 1],
-            'sell_reason': [SellType.ROI, SellType.ROI, SellType.STOP_LOSS]
+            'exit_reason': [ExitType.ROI, ExitType.ROI, ExitType.STOP_LOSS]
         }
     )
 
     result_str = (
-        '|   Sell Reason |   Sells |   Win  Draws  Loss  Win% |   Avg Profit % |   Cum Profit % |'
+        '|   Exit Reason |   Exits |   Win  Draws  Loss  Win% |   Avg Profit % |   Cum Profit % |'
         '   Tot Profit BTC |   Tot Profit % |\n'
         '|---------------+---------+--------------------------+----------------+----------------+'
         '------------------+----------------|\n'
@@ -288,9 +401,9 @@ def test_text_table_sell_reason():
         '             -0.2 |             -5 |'
     )
 
-    sell_reason_stats = generate_sell_reason_stats(max_open_trades=2,
+    exit_reason_stats = generate_exit_reason_stats(max_open_trades=2,
                                                    results=results)
-    assert text_table_sell_reason(sell_reason_stats=sell_reason_stats,
+    assert text_table_exit_reason(exit_reason_stats=exit_reason_stats,
                                   stake_currency='BTC') == result_str
 
 
@@ -305,23 +418,23 @@ def test_generate_sell_reason_stats():
             'wins': [2, 0, 0],
             'draws': [0, 0, 0],
             'losses': [0, 0, 1],
-            'sell_reason': [SellType.ROI.value, SellType.ROI.value, SellType.STOP_LOSS.value]
+            'exit_reason': [ExitType.ROI.value, ExitType.ROI.value, ExitType.STOP_LOSS.value]
         }
     )
 
-    sell_reason_stats = generate_sell_reason_stats(max_open_trades=2,
+    exit_reason_stats = generate_exit_reason_stats(max_open_trades=2,
                                                    results=results)
-    roi_result = sell_reason_stats[0]
-    assert roi_result['sell_reason'] == 'roi'
+    roi_result = exit_reason_stats[0]
+    assert roi_result['exit_reason'] == 'roi'
     assert roi_result['trades'] == 2
     assert pytest.approx(roi_result['profit_mean']) == 0.15
     assert roi_result['profit_mean_pct'] == round(roi_result['profit_mean'] * 100, 2)
     assert pytest.approx(roi_result['profit_mean']) == 0.15
     assert roi_result['profit_mean_pct'] == round(roi_result['profit_mean'] * 100, 2)
 
-    stop_result = sell_reason_stats[1]
+    stop_result = exit_reason_stats[1]
 
-    assert stop_result['sell_reason'] == 'stop_loss'
+    assert stop_result['exit_reason'] == 'stop_loss'
     assert stop_result['trades'] == 1
     assert pytest.approx(stop_result['profit_mean']) == -0.1
     assert stop_result['profit_mean_pct'] == round(stop_result['profit_mean'] * 100, 2)
@@ -330,19 +443,19 @@ def test_generate_sell_reason_stats():
 
 
 def test_text_table_strategy(testdatadir):
-    filename = testdatadir / "backtest-result_multistrat.json"
+    filename = testdatadir / "backtest_results/backtest-result_multistrat.json"
     bt_res_data = load_backtest_stats(filename)
 
     bt_res_data_comparison = bt_res_data.pop('strategy_comparison')
 
     result_str = (
-        '|       Strategy |   Buys |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |'
+        '|       Strategy |   Entries |   Avg Profit % |   Cum Profit % |   Tot Profit BTC |'
         '   Tot Profit % |   Avg Duration |   Win  Draw  Loss  Win% |              Drawdown |\n'
-        '|----------------+--------+----------------+----------------+------------------+'
+        '|----------------+-----------+----------------+----------------+------------------+'
         '----------------+----------------+-------------------------+-----------------------|\n'
-        '| StrategyTestV2 |    179 |           0.08 |          14.39 |       0.02608550 |'
+        '| StrategyTestV2 |       179 |           0.08 |          14.39 |       0.02608550 |'
         '         260.85 |        3:40:00 |   170     0     9  95.0 | 0.00308222 BTC  8.67% |\n'
-        '|   TestStrategy |    179 |           0.08 |          14.39 |       0.02608550 |'
+        '|   TestStrategy |       179 |           0.08 |          14.39 |       0.02608550 |'
         '         260.85 |        3:40:00 |   170     0     9  95.0 | 0.00308222 BTC  8.67% |'
     )
 
@@ -362,7 +475,7 @@ def test_generate_edge_table():
 
 
 def test_generate_periodic_breakdown_stats(testdatadir):
-    filename = testdatadir / "backtest-result_new.json"
+    filename = testdatadir / "backtest_results/backtest-result.json"
     bt_data = load_backtest_data(filename).to_dict(orient='records')
 
     res = generate_periodic_breakdown_stats(bt_data, 'day')
@@ -383,20 +496,23 @@ def test_generate_periodic_breakdown_stats(testdatadir):
 def test__get_resample_from_period():
 
     assert _get_resample_from_period('day') == '1d'
-    assert _get_resample_from_period('week') == '1w'
+    assert _get_resample_from_period('week') == '1W-MON'
     assert _get_resample_from_period('month') == '1M'
     with pytest.raises(ValueError, match=r"Period noooo is not supported."):
         _get_resample_from_period('noooo')
 
+    for period in BACKTEST_BREAKDOWNS:
+        assert isinstance(_get_resample_from_period(period), str)
+
 
 def test_show_sorted_pairlist(testdatadir, default_conf, capsys):
-    filename = testdatadir / "backtest-result_new.json"
+    filename = testdatadir / "backtest_results/backtest-result.json"
     bt_data = load_backtest_stats(filename)
     default_conf['backtest_show_pair_list'] = True
 
     show_sorted_pairlist(default_conf, bt_data)
 
     out, err = capsys.readouterr()
-    assert 'Pairs for Strategy StrategyTestV2: \n[' in out
+    assert 'Pairs for Strategy StrategyTestV3: \n[' in out
     assert 'TOTAL' not in out
     assert '"ETH/BTC",  // ' in out

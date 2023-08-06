@@ -1,21 +1,21 @@
 # Advanced Strategies
 
 This page explains some advanced concepts available for strategies.
-If you're just getting started, please be familiar with the methods described in the [Strategy Customization](strategy-customization.md) documentation and with the [Freqtrade basics](bot-basics.md) first.
+If you're just getting started, please familiarize yourself with the [Freqtrade basics](bot-basics.md) and methods described in [Strategy Customization](strategy-customization.md) first.
 
-[Freqtrade basics](bot-basics.md) describes in which sequence each method described below is called, which can be helpful to understand which method to use for your custom needs.
+The call sequence of the methods described here is covered under [bot execution logic](bot-basics.md#bot-execution-logic). Those docs are also helpful in deciding which method is most suitable for your customisation needs.
 
 !!! Note
-    All callback methods described below should only be implemented in a strategy if they are actually used.
+    Callback methods should *only* be implemented if a strategy uses them.
 
 !!! Tip
-    You can get a strategy template containing all below methods by running `freqtrade new-strategy --strategy MyAwesomeStrategy --template advanced`
+    Start off with a strategy template containing all available callback methods by running `freqtrade new-strategy --strategy MyAwesomeStrategy --template advanced`
 
 ## Storing information
 
 Storing information can be accomplished by creating a new dictionary within the strategy class.
 
-The name of the variable can be chosen at will, but should be prefixed with `cust_` to avoid naming collisions with predefined strategy variables.
+The name of the variable can be chosen at will, but should be prefixed with `custom_` to avoid naming collisions with predefined strategy variables.
 
 ```python
 class AwesomeStrategy(IStrategy):
@@ -49,7 +49,7 @@ from freqtrade.exchange import timeframe_to_prev_date
 
 class AwesomeStrategy(IStrategy):
     def confirm_trade_exit(self, pair: str, trade: 'Trade', order_type: str, amount: float,
-                           rate: float, time_in_force: str, sell_reason: str,
+                           rate: float, time_in_force: str, exit_reason: str,
                            current_time: 'datetime', **kwargs) -> bool:
         # Obtain pair dataframe.
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
@@ -77,47 +77,53 @@ class AwesomeStrategy(IStrategy):
 
 ***
 
-## Buy Tag
+## Enter Tag
 
 When your strategy has multiple buy signals, you can name the signal that triggered.
-Then you can access you buy signal on `custom_sell`
+Then you can access your buy signal on `custom_exit`
 
 ```python
-def populate_buy_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
     dataframe.loc[
         (
             (dataframe['rsi'] < 35) &
             (dataframe['volume'] > 0)
         ),
-        ['buy', 'buy_tag']] = (1, 'buy_signal_rsi')
+        ['enter_long', 'enter_tag']] = (1, 'buy_signal_rsi')
 
     return dataframe
 
-def custom_sell(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
-                    current_profit: float, **kwargs):
+def custom_exit(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
+                current_profit: float, **kwargs):
     dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
     last_candle = dataframe.iloc[-1].squeeze()
-    if trade.buy_tag == 'buy_signal_rsi' and last_candle['rsi'] > 80:
+    if trade.enter_tag == 'buy_signal_rsi' and last_candle['rsi'] > 80:
         return 'sell_signal_rsi'
     return None
 
 ```
 
 !!! Note
-    `buy_tag` is limited to 100 characters, remaining data will be truncated.
+    `enter_tag` is limited to 100 characters, remaining data will be truncated.
+
+!!! Warning
+    There is only one `enter_tag` column, which is used for both long and short trades.
+    As a consequence, this column must be treated as "last write wins" (it's just a dataframe column after all).
+    In fancy situations, where multiple signals collide (or if signals are deactivated again based on different conditions), this can lead to odd results with the wrong tag applied to an entry signal.
+    These results are a consequence of the strategy overwriting prior tags - where the last tag will "stick" and will be the one freqtrade will use.
 
 ## Exit tag
 
 Similar to [Buy Tagging](#buy-tag), you can also specify a sell tag.
 
 ``` python
-def populate_sell_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
     dataframe.loc[
         (
             (dataframe['rsi'] > 70) &
             (dataframe['volume'] > 0)
         ),
-        ['sell', 'exit_tag']] = (1, 'exit_rsi')
+        ['exit_long', 'exit_tag']] = (1, 'exit_rsi')
 
     return dataframe
 ```
@@ -125,7 +131,7 @@ def populate_sell_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame
 The provided exit-tag is then used as sell-reason - and shown as such in backtest results.
 
 !!! Note
-    `sell_reason` is limited to 100 characters, remaining data will be truncated.
+    `exit_reason` is limited to 100 characters, remaining data will be truncated.
 
 ## Strategy version
 
@@ -221,6 +227,8 @@ for val in self.buy_ema_short.range:
         f'ema_short_{val}': ta.EMA(dataframe, timeperiod=val)
     }))
 
-# Append columns to existing dataframe
-merged_frame = pd.concat(frames, axis=1)
+# Combine all dataframes, and reassign the original dataframe column
+dataframe = pd.concat(frames, axis=1)
 ```
+
+Freqtrade does however also counter this by running `dataframe.copy()` on the dataframe right after the `populate_indicators()` method - so performance implications of this should be low to non-existant.

@@ -1,6 +1,6 @@
 # Exchange-specific Notes
 
-This page combines common gotchas and informations which are exchange-specific and most likely don't apply to other exchanges.
+This page combines common gotchas and Information which are exchange-specific and most likely don't apply to other exchanges.
 
 ## Exchange configuration
 
@@ -54,15 +54,19 @@ This configuration enables kraken, as well as rate-limiting to avoid bans from t
 
 ## Binance
 
+!!! Warning "Server location and geo-ip restrictions"
+    Please be aware that binance restrict api access regarding the server country. The currents and non exhaustive countries blocked are United States, Malaysia (Singapour), Ontario (Canada). Please go to [binance terms > b. Eligibility](https://www.binance.com/en/terms) to find up to date list.
+
 Binance supports [time_in_force](configuration.md#understand-order_time_in_force).
 
 !!! Tip "Stoploss on Exchange"
-    Binance supports `stoploss_on_exchange` and uses `stop-loss-limit` orders. It provides great advantages, so we recommend to benefit from it by enabling stoploss on exchange..
+    Binance supports `stoploss_on_exchange` and uses `stop-loss-limit` orders. It provides great advantages, so we recommend to benefit from it by enabling stoploss on exchange.
+    On futures, Binance supports both `stop-limit` as well as `stop-market` orders. You can use either `"limit"` or `"market"` in the `order_types.stoploss` configuration setting to decide which type to use.
 
-### Binance Blacklist
+### Binance Blacklist recommendation
 
-For Binance, please add `"BNB/<STAKE>"` to your blacklist to avoid issues.
-Accounts having BNB accounts use this to pay for fees - if your first trade happens to be on `BNB`, further trades will consume this position and make the initial BNB trade unsellable as the expected amount is not there anymore.
+For Binance, it is suggested to add `"BNB/<STAKE>"` to your blacklist to avoid issues, unless you are willing to maintain enough extra `BNB` on the account or unless you're willing to disable using `BNB` for fees.
+Binance accounts may use `BNB` for fees, and if a trade happens to be on `BNB`, further trades may consume this position and make the initial BNB trade unsellable as the expected amount is not there anymore.
 
 ### Binance sites
 
@@ -70,6 +74,56 @@ Binance has been split into 2, and users must use the correct ccxt exchange ID f
 
 * [binance.com](https://www.binance.com/) - International users. Use exchange id: `binance`.
 * [binance.us](https://www.binance.us/) - US based users. Use exchange id: `binanceus`.
+
+### Binance RSA keys
+
+Freqtrade supports binance RSA API keys.
+
+We recommend to use them as environment variable.
+
+``` bash
+export FREQTRADE__EXCHANGE__SECRET="$(cat ./rsa_binance.private)"
+```
+
+They can however also be configured via configuration file. Since json doesn't support multi-line strings, you'll have to replace all newlines with `\n` to have a valid json file.
+
+``` json
+// ...
+ "key": "<someapikey>",
+ "secret": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBABACAFQA<...>s8KX8=\n-----END PRIVATE KEY-----"
+// ...
+```
+
+### Binance Futures
+
+Binance has specific (unfortunately complex) [Futures Trading Quantitative Rules](https://www.binance.com/en/support/faq/4f462ebe6ff445d4a170be7d9e897272) which need to be followed, and which prohibit a too low stake-amount (among others) for too many orders.
+Violating these rules will result in a trading restriction.
+
+When trading on Binance Futures market, orderbook must be used because there is no price ticker data for futures.
+
+``` jsonc
+  "entry_pricing": {
+      "use_order_book": true,
+      "order_book_top": 1,
+      "check_depth_of_market": {
+          "enabled": false,
+          "bids_to_ask_delta": 1
+      }
+  },
+  "exit_pricing": {
+      "use_order_book": true,
+      "order_book_top": 1
+  },
+```
+
+#### Binance futures settings
+
+Users will also have to have the futures-setting "Position Mode" set to "One-way Mode", and "Asset Mode" set to "Single-Asset Mode".
+These settings will be checked on startup, and freqtrade will show an error if this setting is wrong.
+
+![Binance futures settings](assets/binance_futures_settings.png)
+
+Freqtrade will not attempt to change these settings.
 
 ## Kraken
 
@@ -141,26 +195,6 @@ res = [p for p, x in lm.items() if 'US' in x['info']['prohibitedIn']]
 print(res)
 ```
 
-## FTX
-
-!!! Tip "Stoploss on Exchange"
-    FTX supports `stoploss_on_exchange` and can use both stop-loss-market and stop-loss-limit orders. It provides great advantages, so we recommend to benefit from it.
-    You can use either `"limit"` or `"market"` in the `order_types.stoploss` configuration setting to decide which type of stoploss shall be used.
-
-### Using subaccounts
-
-To use subaccounts with FTX, you need to edit the configuration and add the following:
-
-``` json
-"exchange": {
-    "ccxt_config": {
-        "headers": {
-            "FTX-SUBACCOUNT": "name"
-        }
-    },
-}
-```
-
 ## Kucoin
 
 Kucoin requires a passphrase for each api key, you will therefore need to add this key into the configuration so your exchange section looks as follows:
@@ -183,8 +217,8 @@ Kucoin supports [time_in_force](configuration.md#understand-order_time_in_force)
 
 ### Kucoin Blacklists
 
-For Kucoin, please add `"KCS/<STAKE>"` to your blacklist to avoid issues.
-Accounts having KCS accounts use this to pay for fees - if your first trade happens to be on `KCS`, further trades will consume this position and make the initial KCS trade unsellable as the expected amount is not there anymore.
+For Kucoin, it is suggested to add `"KCS/<STAKE>"` to your blacklist to avoid issues, unless you are willing to maintain enough extra `KCS` on the account or unless you're willing to disable using `KCS` for fees. 
+Kucoin accounts may use `KCS` for fees, and if a trade happens to be on `KCS`, further trades may consume this position and make the initial `KCS` trade unsellable as the expected amount is not there anymore.
 
 ## Huobi
 
@@ -208,6 +242,11 @@ OKX requires a passphrase for each api key, you will therefore need to add this 
 !!! Warning
     OKX only provides 100 candles per api call. Therefore, the strategy will only have a pretty low amount of data available in backtesting mode.
 
+!!! Warning "Futures"
+    OKX Futures has the concept of "position mode" - which can be "Buy/Sell" or long/short (hedge mode).
+    Freqtrade supports both modes (we recommend to use Buy/Sell mode) - but changing the mode mid-trading is not supported and will lead to exceptions and failures to place trades.
+    OKX also only provides MARK candles for the past ~3 months. Backtesting futures prior to that date will therefore lead to slight deviations, as funding-fees cannot be calculated correctly without this data.
+
 ## Gate.io
 
 !!! Tip "Stoploss on Exchange"
@@ -215,6 +254,25 @@ OKX requires a passphrase for each api key, you will therefore need to add this 
 
 Gate.io allows the use of `POINT` to pay for fees. As this is not a tradable currency (no regular market available), automatic fee calculations will fail (and default to a fee of 0).
 The configuration parameter `exchange.unknown_fee_rate` can be used to specify the exchange rate between Point and the stake currency. Obviously, changing the stake-currency will also require changes to this value.
+
+## Bybit
+
+Futures trading on bybit is currently supported for USDT markets, and will use isolated futures mode.
+Users with unified accounts (there's no way back) can create a Sub-account which will start as "non-unified", and can therefore use isolated futures.
+On startup, freqtrade will set the position mode to "One-way Mode" for the whole (sub)account. This avoids making this call over and over again (slowing down bot operations), but means that changes to this setting may result in exceptions and errors
+
+As bybit doesn't provide funding rate history, the dry-run calculation is used for live trades as well.
+
+API Keys for live futures trading (Subaccount on non-unified) must have the following permissions:
+* Read-write
+* Contract - Orders
+* Contract - Positions
+
+We do strongly recommend to limit all API keys to the IP you're going to use it from.
+
+!!! Tip "Stoploss on Exchange"
+    Bybit (futures only) supports `stoploss_on_exchange` and uses `stop-loss-limit` orders. It provides great advantages, so we recommend to benefit from it by enabling stoploss on exchange.
+    On futures, Bybit supports both `stop-limit` as well as `stop-market` orders. You can use either `"limit"` or `"market"` in the `order_types.stoploss` configuration setting to decide which type to use.
 
 ## All exchanges
 
@@ -251,7 +309,7 @@ For example, to test the order type `FOK` with Kraken, and modify candle limit t
 "exchange": {
     "name": "kraken",
     "_ft_has_params": {
-        "order_time_in_force": ["gtc", "fok"],
+        "order_time_in_force": ["GTC", "FOK"],
         "ohlcv_candle_limit": 200
         }
     //...
